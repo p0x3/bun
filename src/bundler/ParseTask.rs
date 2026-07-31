@@ -110,10 +110,14 @@ pub struct ParseTask {
     pub(crate) module_type: options::ModuleType,
     pub(crate) emit_decorator_metadata: bool,
     pub(crate) experimental_decorators: bool,
-    /// BACKREF (LIFETIMES.tsv) — written through in
-    /// `on_complete`. `None` only in the `default()` placeholder; every
-    /// scheduled task has it set via `init` / `bundle_v2.rs` write-sites.
-    pub ctx: Option<bun_ptr::ParentRef<BundleV2<'static>, bun_ptr::Mut>>,
+    /// Worker-facing BACKREF (LIFETIMES.tsv): worker threads only ever
+    /// read the bundle through this (`ctx()` derefs it shared). `None` only
+    /// in the `default()` placeholder.
+    pub ctx: Option<bun_ptr::ParentRef<BundleV2<'static>>>,
+    /// Completion-facing handle to the same bundle, carried to the main
+    /// thread in [`Result::ctx`]; the only place a `&mut BundleV2` is formed
+    /// (`on_complete`), never from a worker.
+    pub completion_ctx: Option<bun_ptr::ParentRef<BundleV2<'static>, bun_ptr::Mut>>,
     // Borrows package_json (resolver arena); valid for the bundle pass.
     pub(crate) package_version: ast::StoreStr,
     pub(crate) package_name: ast::StoreStr,
@@ -249,7 +253,8 @@ impl ParseTask {
         let ctx_ref = unsafe { bun_ptr::ParentRef::from_raw_mut(ctx.cast::<BundleV2<'static>>()) };
         let known_target = ctx_ref.get().transpiler().options.target;
         ParseTask {
-            ctx: Some(ctx_ref),
+            ctx: Some(ctx_ref.shared()),
+            completion_ctx: Some(ctx_ref),
             path: resolve_result.path_pair.primary,
             contents_or_fd: ContentsOrFd::Fd {
                 dir: resolve_result.dirname_fd,
@@ -297,6 +302,7 @@ impl Default for ParseTask {
     fn default() -> Self {
         ParseTask {
             ctx: None,
+            completion_ctx: None,
             path: Fs::Path::init(b""),
             secondary_path_for_commonjs_interop: None,
             contents_or_fd: ContentsOrFd::Contents(b""),
@@ -530,6 +536,7 @@ pub mod parse_worker {
 
         let parse_task = ParseTask {
             ctx: None,
+            completion_ctx: None,
             path: Fs::Path::init_with_namespace(b"runtime", b"bun:runtime"),
             side_effects: bun_ast::SideEffects::NoSideEffectsPureData,
             jsx: options::jsx::Pragma {
@@ -2767,7 +2774,7 @@ pub mod parse_worker {
         };
 
         let result = Box::new(Result {
-            ctx: this.ctx.expect("ParseTask.ctx unset"),
+            ctx: this.completion_ctx.expect("ParseTask.completion_ctx unset"),
             task: EventLoop::Task::default(),
             value,
             // `ExternalFreeFunction`
