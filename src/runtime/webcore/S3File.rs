@@ -587,9 +587,9 @@ impl S3BlobStatTask {
             store: blob.store.get().as_ref().unwrap().clone(),
             global: bun_ptr::BackRef::new(global),
         });
-        // SAFETY: `this` is a freshly leaked Box; valid for the duration of this call
-        let this_ref = unsafe { &mut *this };
-        let promise = this_ref.promise.value();
+        // SAFETY: `this` is a freshly leaked Box; sole pointer until handed to the s3
+        // callback below. Scoped shared access.
+        let promise = unsafe { (*this).promise.value() };
         let s3_store = blob.store.get().as_ref().unwrap().data.as_s3();
         let credentials = s3_store.get_credentials();
         let path = s3_store.path();
@@ -614,9 +614,9 @@ impl S3BlobStatTask {
             store: blob.store.get().as_ref().unwrap().clone(),
             global: bun_ptr::BackRef::new(global),
         });
-        // SAFETY: `this` is a freshly leaked Box; valid for the duration of this call
-        let this_ref = unsafe { &mut *this };
-        let promise = this_ref.promise.value();
+        // SAFETY: `this` is a freshly leaked Box; sole pointer until handed to the s3
+        // callback below. Scoped shared access.
+        let promise = unsafe { (*this).promise.value() };
         let s3_store = blob.store.get().as_ref().unwrap().data.as_s3();
         let credentials = s3_store.get_credentials();
         let path = s3_store.path();
@@ -641,9 +641,9 @@ impl S3BlobStatTask {
             store: blob.store.get().as_ref().unwrap().clone(),
             global: bun_ptr::BackRef::new(global),
         });
-        // SAFETY: `this` is a freshly leaked Box; valid for the duration of this call
-        let this_ref = unsafe { &mut *this };
-        let promise = this_ref.promise.value();
+        // SAFETY: `this` is a freshly leaked Box; sole pointer until handed to the s3
+        // callback below. Scoped shared access.
+        let promise = unsafe { (*this).promise.value() };
         let s3_store = blob.store.get().as_ref().unwrap().data.as_s3();
         let credentials = s3_store.get_credentials();
         let path = s3_store.path();

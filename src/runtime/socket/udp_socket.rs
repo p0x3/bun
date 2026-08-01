@@ -44,6 +44,19 @@ bun_output::declare_scope!(UdpSocket, visible);
 /// `connect()` path (line ~575): `us_udp_socket_connect()` returns a Winsock
 /// status, not a CRT errno, so reading `_errno()` here would be the wrong
 /// source.
+/// Reborrow `storage` as a specific sockaddr family. `sockaddr_storage` is
+/// sized and aligned for every sockaddr type, and the `&mut` derives from the
+/// caller's borrow.
+#[inline]
+fn storage_as<T>(storage: &mut sockaddr_storage) -> &mut T {
+    const {
+        assert!(size_of::<T>() <= size_of::<sockaddr_storage>());
+        assert!(align_of::<T>() <= align_of::<sockaddr_storage>());
+    }
+    // SAFETY: size/alignment checked above; provenance comes from `storage`.
+    unsafe { &mut *std::ptr::from_mut(storage).cast::<T>() }
+}
+
 #[inline]
 fn errno_sys(rc: c_int, tag: bun_sys::Tag) -> Option<bun_sys::Error> {
     #[cfg(windows)]
@@ -161,8 +174,6 @@ extern "C" fn on_data(
     }
 
     let global_this = udp_socket.global_this.get();
-    // SAFETY: buf valid for the duration of this callback per uws contract.
-    let buf = unsafe { &mut *buf };
 
     let mut i: c_int = 0;
     while i < packets {
@@ -175,7 +186,10 @@ extern "C" fn on_data(
             break;
         }
 
-        let peer = buf.get_peer(i);
+        // SAFETY: `buf` is valid for the duration of this callback per uws
+        // contract; each access reborrows it per-statement so no reference
+        // spans the JS calls below.
+        let peer = unsafe { (*buf).get_peer(i) };
 
         let mut addr_buf = [0u8; INET6_ADDRSTRLEN + 1];
         let hostname: Option<&[u8]>;
@@ -219,8 +233,11 @@ extern "C" fn on_data(
             continue;
         }
 
-        let truncated = buf.get_truncated(i);
-        let slice = buf.get_payload(i);
+        // SAFETY: see `get_peer` above; per-statement reborrows.
+        let truncated = unsafe { (*buf).get_truncated(i) };
+        // SAFETY: see `get_peer` above; `slice`'s borrow ends at the
+        // `binary_type.to_js` copy below, before user JS runs.
+        let slice = unsafe { (*buf).get_payload(i) };
 
         let span = hostname.unwrap();
         #[allow(unused_labels)]
@@ -1264,14 +1281,17 @@ impl UDPSocket {
             result: JsResult<JSValue>,
         }
         extern "C" fn run(ctx: *mut Ctx<'_>, payload_roots: *mut MarkedArgumentBuffer) {
-            // SAFETY: ctx points to the stack-local Ctx passed to
-            // MarkedArgumentBuffer::run below; exclusive for this call.
-            let ctx = unsafe { &mut *ctx };
-            // SAFETY: payload_roots is the stack MarkedArgumentBuffer that
-            // MarkedArgumentBuffer::run lends exclusively to this callback.
-            let payload_roots = unsafe { &mut *payload_roots };
-            ctx.result =
-                UDPSocket::send_many_impl(ctx.this, ctx.global_this, ctx.callframe, payload_roots);
+            // SAFETY: `ctx` and `payload_roots` are the stack locals
+            // `MarkedArgumentBuffer::run` lends exclusively to this callback;
+            // the reborrows are scoped to this single call.
+            unsafe {
+                (*ctx).result = UDPSocket::send_many_impl(
+                    (*ctx).this,
+                    (*ctx).global_this,
+                    (*ctx).callframe,
+                    &mut *payload_roots,
+                );
+            }
         }
         let mut ctx = Ctx {
             this,
@@ -1576,8 +1596,7 @@ impl UDPSocket {
         let mut address_slice: Vec<u8> = str.to_owned_slice_z().into_vec_with_nul();
         let bytes_len = address_slice.len() - 1; // exclude trailing NUL
 
-        // SAFETY: storage is large enough to hold sockaddr_in.
-        let addr4 = unsafe { &mut *std::ptr::from_mut(storage).cast::<sockaddr_in>() };
+        let addr4: &mut sockaddr_in = storage_as(storage);
         // SAFETY: libc addr-format fn; src is NUL-terminated, dst points to in_addr-sized storage.
         if unsafe {
             inet_pton(
@@ -1590,8 +1609,7 @@ impl UDPSocket {
             addr4.port = htons(port);
             addr4.family = inet::AF_INET as inet::sa_family_t;
         } else {
-            // SAFETY: storage is large enough to hold sockaddr_in6.
-            let addr6 = unsafe { &mut *std::ptr::from_mut(storage).cast::<sockaddr_in6>() };
+            let addr6: &mut sockaddr_in6 = storage_as(storage);
             addr6.scope_id = 0;
 
             if let Some(percent) = address_slice[..bytes_len].iter().position(|&b| b == b'%') {
@@ -2296,8 +2314,7 @@ pub(crate) fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> Js
         // Numeric literals only — the JS layer resolves names before calling.
         let mut storage: sockaddr_storage = bun_core::ffi::zeroed();
 
-        // SAFETY: storage is large enough for sockaddr_in; src is NUL-terminated.
-        let addr4 = unsafe { &mut *std::ptr::from_mut(&mut storage).cast::<sockaddr_in>() };
+        let addr4: &mut sockaddr_in = storage_as(&mut storage);
         // SAFETY: libc addr-format fn; src is NUL-terminated, dst points to in_addr-sized storage.
         let parsed_v4 = unsafe {
             inet_pton(
@@ -2311,8 +2328,7 @@ pub(crate) fn js_dgram_bind_fd(global: &JSGlobalObject, frame: &CallFrame) -> Js
             addr4.port = htons(port);
             size_of::<sockaddr_in>() as libc::socklen_t
         } else {
-            // SAFETY: storage is large enough for sockaddr_in6.
-            let addr6 = unsafe { &mut *std::ptr::from_mut(&mut storage).cast::<sockaddr_in6>() };
+            let addr6: &mut sockaddr_in6 = storage_as(&mut storage);
             // SAFETY: libc addr-format fn; src is NUL-terminated, dst points to in6_addr-sized storage.
             let parsed_v6 = unsafe {
                 inet_pton(
